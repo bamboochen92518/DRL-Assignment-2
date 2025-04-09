@@ -364,6 +364,9 @@ for fn, wt in weight_table.items():
 
 def get_action(state, score):
     env = Game2048Env()
+    env.board = state.copy()
+    env.score = score
+
     legal_moves = [a for a in range(4) if env.is_move_legal(a)]
     legal_moves = reorder_action(legal_moves)
 
