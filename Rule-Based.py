@@ -187,6 +187,7 @@ class Connect6Game:
                 score += 100
     
         return score
+
     def show_board(self):
         """Displays the board in text format."""
         print("= ")
