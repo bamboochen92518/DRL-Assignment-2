@@ -8,6 +8,21 @@ import matplotlib.pyplot as plt
 import copy
 import random
 import math
+import json
+from collections import defaultdict
+
+
+COLOR_MAP = {
+    0: "#cdc1b4", 2: "#eee4da", 4: "#ede0c8", 8: "#f2b179",
+    16: "#f59563", 32: "#f67c5f", 64: "#f65e3b", 128: "#edcf72",
+    256: "#edcc61", 512: "#edc850", 1024: "#edc53f", 2048: "#edc22e",
+    4096: "#3c3a32", 8192: "#3c3a32", 16384: "#3c3a32", 32768: "#3c3a32"
+}
+TEXT_COLOR = {
+    2: "#776e65", 4: "#776e65", 8: "#f9f6f2", 16: "#f9f6f2",
+    32: "#f9f6f2", 64: "#f9f6f2", 128: "#f9f6f2", 256: "#f9f6f2",
+    512: "#f9f6f2", 1024: "#f9f6f2", 2048: "#f9f6f2", 4096: "#f9f6f2"
+}
 
 
 class Game2048Env(gym.Env):
@@ -148,13 +163,14 @@ class Game2048Env(gym.Env):
             moved = False
 
         self.last_move_valid = moved  # Record if the move was valid
+        before_add = copy.deepcopy(self.board)
 
         if moved:
             self.add_random_tile()
 
         done = self.is_game_over()
 
-        return self.board, self.score, done, {}
+        return self.board, self.score, done, before_add
 
     def render(self, mode="human", action=None):
         """
@@ -231,10 +247,135 @@ class Game2048Env(gym.Env):
         # If the simulated board is different from the current board, the move is legal
         return not np.array_equal(self.board, temp_board)
 
+
+def rot90(pattern):
+    return [(y, 3 - x) for x, y in pattern]
+
+
+def rot180(pattern):
+    return [(3 - x, 3 - y) for x, y in pattern]
+
+
+def rot270(pattern):
+    return [(3 - y, x) for x, y in pattern]
+
+
+def flip_horizontal(pattern):
+    return [(3 - x, y) for x, y in pattern]
+
+
+class NTupleApproximator:
+    def __init__(self, board_size, patterns):
+        """
+        Initializes the N-Tuple approximator.
+        Hint: you can adjust these if you want
+        """
+        self.board_size = board_size
+        self.patterns = patterns
+        # Create a weight dictionary for each pattern (shared within a pattern group)
+        self.weights = [defaultdict(float) for _ in patterns]
+        # Generate symmetrical transformations for each pattern
+        self.symmetry_patterns = dict()
+        for pattern in self.patterns:
+            self.symmetry_patterns[pattern] = self.generate_symmetries(pattern)
+
+    def generate_symmetries(self, pattern):
+        # TODO: Generate 8 symmetrical transformations of the given pattern.
+        syms = set()
+        for p in [pattern, rot90(pattern), rot180(pattern), rot270(pattern)]:
+            # print([hex(4*pts[0] + pts[1]) for pts in p])
+            syms.add(tuple(p))
+            p = flip_horizontal(p)
+            # print([hex(4*pts[0] + pts[1]) for pts in p])
+            syms.add(tuple(p))
+        return list(syms)
+
+    def tile_to_index(self, tile):
+        """
+        Converts tile values to an index for the lookup table.
+        """
+        return 0 if tile == 0 else int(math.log(tile, 2))
+
+    def get_feature(self, board, coords):
+        # TODO: Extract tile values from the board based on the given coordinates and convert them into a feature tuple.
+        return tuple(self.tile_to_index(board[x, y]) for x, y in coords)
+
+    def value(self, board):
+        # TODO: Estimate the board value: sum the evaluations from all patterns.
+        total_value = 0
+        for pattern, weight_table in zip(self.patterns, self.weights):
+            for sym_pattern in self.symmetry_patterns[pattern]:
+                feature = self.get_feature(board, sym_pattern)
+                total_value += weight_table[feature]
+                # print(feature, weight_table[feature])
+        # print("Total: ", total_value)
+        return total_value
+
+    def update(self, board, delta, alpha):
+        # TODO: Update weights based on the TD error.
+        # delta /= len(self.patterns)
+        for pattern, weight_table in zip(self.patterns, self.weights):
+            sym_num = len(self.symmetry_patterns[pattern])
+            for sym_pattern in self.symmetry_patterns[pattern]:
+                feature = self.get_feature(board, sym_pattern)
+                weight_table[feature] += alpha * delta / sym_num
+
+
+def f2t(f: str):
+    hex_number = hex(int(f))
+    hex_number = hex_number[2:]
+    hex_number = "0" * (5 - len(hex_number)) + hex_number
+    reversed_hex = hex_number[::-1]
+    decimal_values = []
+    for char in reversed_hex:
+        decimal_value = int(char, 16)
+        decimal_values.append(decimal_value)
+
+    return tuple(decimal_values)
+
+
+def reorder_action(a: list):
+    ret = []
+    order = [0, 3, 1, 2]
+    for o in order:
+        if o in a:
+            ret.append(o)
+    return ret
+
+
+patterns = [
+        ((0, 0), (0, 1), (0, 2), (1, 1), (2, 1)),          # T01259
+        ((1, 2), (2, 2), (2, 3), (3, 0), (3, 1)),          # dog 6, 10, 11, 12, 13
+        ((0, 1), (0, 2), (0, 3), (1, 1), (2, 1)),          # L
+    ]
+
+file_path = "approximator-23100000.json"
+with open(file_path, "r") as file:
+    weight_table = json.load(file)
+approximator = NTupleApproximator(board_size=4, patterns=patterns)
+i = 0
+for fn, wt in weight_table.items():
+    for f, w in wt.items():
+        t = f2t(f)
+        approximator.weights[i][t] = w
+        # print(t, w)
+    i += 1
+
+
 def get_action(state, score):
     env = Game2048Env()
-    return random.choice([0, 1, 2, 3]) # Choose a random action
-    
-    # You can submit this random agent to evaluate the performance of a purely random strategy.
+    legal_moves = [a for a in range(4) if env.is_move_legal(a)]
+    legal_moves = reorder_action(legal_moves)
 
+    # TODO: Use your N-Tuple approximator to play 2048
+    best_action = legal_moves[0]
+    best_value = 0
+    for a in legal_moves:
+        env_copy = copy.deepcopy(env)
+        next_state, next_score, _, after_state = env_copy.step(a)
+        value = approximator.value(after_state) + next_score
+        if value > best_value:
+            best_action = a
+            best_value = value
 
+    return best_action
