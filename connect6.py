@@ -84,6 +84,29 @@ class Connect6Game:
         self.turn = 3 - self.turn
         print('= ', end='', flush=True)
 
+    def mask(self, empty_positions):
+        points = [(r, c) for r in range(self.size) for c in range(self.size) if self.board[r, c] != 0]
+        if not points:
+            return empty_positions
+        min_x = max_x = points[0][0]
+        min_y = max_y = points[0][1]
+
+        # Find the min and max coordinates
+        for p in points:
+            x, y = p[0], p[1]
+            min_x = min(min_x, x)
+            max_x = max(max_x, x)
+            min_y = min(min_y, y)
+            max_y = max(max_y, y)
+
+        ret = []
+
+        for ep in empty_positions:
+            if min_x - 2 <= ep[0] <= max_x + 2 and min_y - 2 <= ep[1] <= max_y + 2:
+                ret.append(ep)
+
+        return ret
+
     def generate_move(self, color):
         """Generates the best move based on predefined rules and ensures output."""
         if self.game_over:
@@ -92,29 +115,41 @@ class Connect6Game:
 
         my_color = 1 if color.upper() == 'B' else 2
         opponent_color = 3 - my_color
+        points = [(r, c) for r in range(self.size) for c in range(self.size) if self.board[r, c] != 0]
         empty_positions = [(r, c) for r in range(self.size) for c in range(self.size) if self.board[r, c] == 0]
+        empty_positions = self.mask(empty_positions)
+        random.shuffle(empty_positions)
+        if len(points) != 0:
+            # 1. Winning move
+            ep_num = len(empty_positions)
+            for i in range(ep_num):
+                self.board[empty_positions[i][0], empty_positions[i][1]] = my_color
+                for j in range(i + 1, ep_num):
+                    self.board[empty_positions[j][0], empty_positions[j][1]] = my_color
+                    if self.check_win() == my_color:
+                        self.board[empty_positions[i][0], empty_positions[i][1]] = 0
+                        self.board[empty_positions[j][0], empty_positions[j][1]] = 0
+                        move_str = f"{self.index_to_label(empty_positions[j][1])}{empty_positions[j][0] + 1}"
+                        self.play_move(color, move_str)
+                        print(move_str, flush=True)
+                        return
+                    self.board[empty_positions[j][0], empty_positions[j][1]] = 0
+                self.board[empty_positions[i][0], empty_positions[i][1]] = 0
 
-        # 1. Winning move
-        for r, c in empty_positions:
-            self.board[r, c] = my_color
-            if self.check_win() == my_color:
-                self.board[r, c] = 0
-                move_str = f"{self.index_to_label(c)}{r+1}"
-                self.play_move(color, move_str)
-                print(move_str, flush=True)
-                return
-            self.board[r, c] = 0
-
-        # 2. Block opponent's winning move
-        for r, c in empty_positions:
-            self.board[r, c] = opponent_color
-            if self.check_win() == opponent_color:
-                self.board[r, c] = 0
-                move_str = f"{self.index_to_label(c)}{r+1}"
-                self.play_move(color, move_str)
-                print(move_str, flush=True)
-                return
-            self.board[r, c] = 0
+            # 2. Block opponent's winning move
+            for i in range(ep_num):
+                self.board[empty_positions[i][0], empty_positions[i][1]] = opponent_color
+                for j in range(i + 1, ep_num):
+                    self.board[empty_positions[j][0], empty_positions[j][1]] = opponent_color
+                    if self.check_win() == opponent_color:
+                        self.board[empty_positions[i][0], empty_positions[i][1]] = 0
+                        self.board[empty_positions[j][0], empty_positions[j][1]] = 0
+                        move_str = f"{self.index_to_label(empty_positions[j][1])}{empty_positions[j][0] + 1}"
+                        self.play_move(color, move_str)
+                        print(move_str, flush=True)
+                        return
+                    self.board[empty_positions[j][0], empty_positions[j][1]] = 0
+                self.board[empty_positions[i][0], empty_positions[i][1]] = 0
 
         # 3. Attack: prioritize strong formations
         best_move = None
@@ -135,7 +170,7 @@ class Connect6Game:
         # 5. Execute best move
         if best_move:
             r, c = best_move
-            move_str = f"{self.index_to_label(c)}{r+1}"
+            move_str = f"{self.index_to_label(c)}{r + 1}"
             self.play_move(color, move_str)
             print(move_str, flush=True)
             return
@@ -148,14 +183,14 @@ class Connect6Game:
                                            if self.board[r, c] == 0]
             if potential_moves:
                 selected = random.choice(potential_moves)
-                move_str = f"{self.index_to_label(selected[1])}{selected[0]+1}"
+                move_str = f"{self.index_to_label(selected[1])}{selected[0] + 1}"
                 self.play_move(color, move_str)
                 print(move_str, flush=True)
                 return
 
         # 7. Random move as fallback
         selected = random.choice(empty_positions)
-        move_str = f"{self.index_to_label(selected[1])}{selected[0]+1}"
+        move_str = f"{self.index_to_label(selected[1])}{selected[0] + 1}"
         self.play_move(color, move_str)
         print(move_str, flush=True)
 
@@ -167,27 +202,13 @@ class Connect6Game:
         for dr, dc in directions:
             count = 1
             rr, cc = r + dr, c + dc
-            empty = 2
-            while 0 <= rr < self.size and 0 <= cc < self.size:
-                if self.board[rr, cc] == color:
-                    count += 1
-                elif self.board[rr, cc] == 0 and empty > 0:
-                    count += 0.4 * empty
-                    empty -= 1
-                else:
-                    break
+            while 0 <= rr < self.size and 0 <= cc < self.size and self.board[rr, cc] == color:
+                count += 1
                 rr += dr
                 cc += dc
             rr, cc = r - dr, c - dc
-            empty = 2
-            while 0 <= rr < self.size and 0 <= cc < self.size:
-                if self.board[rr, cc] == color:
-                    count += 1
-                elif self.board[rr, cc] == 0 and empty > 0:
-                    count += 0.4 * empty
-                    empty -= 1
-                else:
-                    break
+            while 0 <= rr < self.size and 0 <= cc < self.size and self.board[rr, cc] == color:
+                count += 1
                 rr -= dr
                 cc -= dc
 
@@ -199,14 +220,57 @@ class Connect6Game:
                 score += 1000
             elif count == 2:
                 score += 100
-    
+        '''
+
+        for dr, dc in directions:
+            count = 1
+            rr, cc = r + dr, c + dc
+            dist = [1, 1]
+            while 0 <= rr < self.size and 0 <= cc < self.size:
+                if self.board[rr, cc] == color:
+                    count += 0.8 ** dist[0]
+                    dist[0] += 1
+                elif self.board[rr, cc] == 0:
+                    count += 0.4 ** dist[0]
+                    dist[0] += 1
+                else:
+                    break
+                rr += dr
+                cc += dc
+            rr, cc = r - dr, c - dc
+            while 0 <= rr < self.size and 0 <= cc < self.size:
+                if self.board[rr, cc] == color:
+                    count += 0.8 ** dist[1]
+                    dist[1] += 1
+                elif self.board[rr, cc] == 0:
+                    count += 0.4 ** dist[1]
+                    dist[1] += 1
+                else:
+                    break
+                rr -= dr
+                cc -= dc
+
+            if sum(dist) < 5:
+                score += 0
+                continue
+
+            score += 5 ** count
+            if count >= 5:
+                score += 10000
+            elif count == 4:
+                score += 5000
+            elif count == 3:
+                score += 1000
+            elif count == 2:
+                score += 100
+        '''
         return score
 
     def show_board(self):
         """Displays the board in text format."""
         print("= ")
         for row in range(self.size - 1, -1, -1):
-            line = f"{row+1:2} " + " ".join("X" if self.board[row, col] == 1 else "O" if self.board[row, col] == 2 else "." for col in range(self.size))
+            line = f"{row + 1:2} " + " ".join("X" if self.board[row, col] == 1 else "O" if self.board[row, col] == 2 else "." for col in range(self.size))
             print(line)
         col_labels = "   " + " ".join(self.index_to_label(i) for i in range(self.size))
         print(col_labels)
@@ -214,7 +278,7 @@ class Connect6Game:
 
     def list_commands(self):
         """Lists all available commands."""
-        print("= ", flush=True)  
+        print("= ", flush=True)
 
     def process_command(self, command):
         """Parses and executes GTP commands."""
@@ -224,7 +288,7 @@ class Connect6Game:
 
         if not command:
             return
-        
+
         parts = command.split()
         cmd = parts[0].lower()
 
@@ -269,6 +333,7 @@ class Connect6Game:
                 break
             except Exception as e:
                 print(f"? Error: {str(e)}")
+
 
 if __name__ == "__main__":
     game = Connect6Game()

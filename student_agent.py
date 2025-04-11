@@ -320,6 +320,173 @@ class NTupleApproximator:
                 feature = self.get_feature(board, sym_pattern)
                 weight_table[feature] += alpha * delta / sym_num
 
+# Node for TD-MCTS using the TD-trained value approximator
+class TD_MCTS_Node:
+    def __init__(self, state, parent=None, action=None, is_afterstate=False):
+        """
+        state: current board state (numpy array)
+        score: cumulative score at this node
+        parent: parent node (None for root)
+        action: action taken from parent to reach this node (None for root)
+        is_afterstate: True if this node is an afterstate node (chance node), else a regular state (max node)
+        prob: probability of reaching this node from its parent (used for chance node)
+        """
+        self.state = state.copy()
+        self.parent = parent
+        self.action = action
+        self.is_afterstate = is_afterstate
+
+        self.children = {}  # action -> child node
+        self.visits = 0
+        self.total_reward = 0.0  # accumulated reward for UCB
+
+        # Untried actions or afterstates to expand
+        if not is_afterstate:
+            env = Game2048Env()
+            env.board = state
+            self.untried_actions = [a for a in range(4) if env.is_move_legal(a)]
+        else:
+            self.untried_actions = []  # afterstates will get states as children, not actions
+
+    def fully_expanded(self):
+        return len(self.untried_actions) == 0
+
+    def is_terminal(self):
+        return len([a for a in range(4) if env.is_move_legal(a)]) == 0
+
+
+class TD_MCTS:
+    def __init__(self, env, approximator, iterations=500, exploration_constant=1.41, gamma=0.99, V_norm=1.0):
+        self.env = env
+        self.approximator = approximator
+        self.iterations = iterations
+        self.c = exploration_constant
+        self.gamma = gamma
+        self.V_norm = V_norm
+
+    def create_env_from_state(self, state, score):
+        new_env = copy.deepcopy(self.env)
+        new_env.board = state.copy()
+        new_env.score = score
+        return new_env
+
+    def select_child(self, node):
+        if node.is_afterstate:
+            # Randomly choose based on tile probabilities
+            children = list(node.children.items())
+            probs = [child.prob for _, child in children]
+            selected = random.choices(children, weights=probs, k=1)[0]
+            return selected[1]
+        else:
+            # UCB selection for max node (player)
+            log_parent_visits = math.log(node.visits + 1)
+            return max(
+                node.children.values(),
+                key=lambda child: (child.total_reward / (child.visits + 1e-6)) +
+                                  self.c * math.sqrt(log_parent_visits / (child.visits + 1e-6))
+            )
+
+    def evaluate(self, env):
+        # If node is a max node (state), evaluate all its afterstates
+        best_value = 0
+        for action in range(4):
+            if env.is_move_legal(action):
+                sim_env = copy.deepcopy(env)
+                _, reward, done, after_state = sim_env.step(action)
+                value = reward + self.approximator.value(after_state)
+                best_value = max(best_value, value)
+        return best_value
+
+    def backpropagate(self, node, norm_value):
+        while node is not None:
+            node.visits += 1
+            node.total_reward += norm_value
+            node = node.parent
+
+    def expand(self, node, sim_env):
+        # Expand all legal player moves (state -> afterstate)
+        if not node.is_afterstate:
+            legal_move = node.untried_actions
+            action = legal_move.pop()
+            _, reward, done, after_state = sim_env.step(action)
+            sim_env.board = after_state
+            after_node = TD_MCTS_Node(
+                state=after_state,
+                parent=node,
+                action=action,
+                is_afterstate=True
+            )
+            after_node.value = self.approximator.value(after_state)
+            node.children[action] = after_node
+
+            node = after_node
+
+        # Expand all possible tile spawns (afterstates -> new states)
+        empty_cells = [(i, j) for i in range(4) for j in range(4) if node.state[i][j] == 0]
+        if not empty_cells:
+            return node
+        lucky_cell = random.choice(empty_cells)
+        i, j = lucky_cell
+
+        if random.random() < 0.9:
+            sim_env.board[i][j] = 2
+        else:
+            sim_env.board[i][j] = 4
+
+        if (i, j, sim_env.board[i][j]) not in node.children.keys():
+            child_node = TD_MCTS_Node(
+                state=sim_env.board,
+                parent=node,
+                action=None,
+                is_afterstate=False,
+            )
+            node.children[(i, j, sim_env.board[i][j])] = child_node
+
+        return node.children[(i, j, sim_env.board[i][j])]
+
+    def run_simulation(self, root):
+        node = root
+        sim_env = self.create_env_from_state(node.state, 0)
+
+        # --- SELECTION ---
+        while not node.untried_actions and node.children:
+            assert np.array_equal(sim_env.board, node.state)
+            """
+
+            if node.is_afterstate:
+                print(node.children)
+                print(node.state)
+            """
+            log_parent_visits = math.log(node.visits + 1)
+            best_node = max(node.children.values(), key=lambda child: (child.total_reward / (child.visits + 1e-6)) + self.c * math.sqrt(log_parent_visits / (child.visits + 1e-6)))
+            _, _, _, afterstate = sim_env.step(best_node.action)
+            sim_env.board = afterstate
+            node = best_node
+            node = self.expand(node, sim_env)
+
+        # --- EXPANSION ---
+        if node.untried_actions:
+            node = self.expand(node, sim_env)
+
+        # --- EVALUATION ---
+        value = self.evaluate(sim_env)
+        norm_value = value / self.V_norm
+
+        # --- BACKPROPAGATION ---
+        self.backpropagate(node, norm_value)
+
+    def best_action_distribution(self, root):
+        total_visits = sum(child.visits for child in root.children.values())
+        distribution = np.zeros(4)
+        best_visits = -1
+        best_action = None
+        for action, child in root.children.items():
+            distribution[action] = child.visits / total_visits if total_visits > 0 else 0
+            if child.visits > best_visits:
+                best_visits = child.visits
+                best_action = action
+        return best_action, distribution
+
 
 def f2t(f: str):
     hex_number = hex(int(f))
@@ -353,6 +520,8 @@ file_path = "approximator-23100000.json"
 with open(file_path, "r") as file:
     weight_table = json.load(file)
 approximator = NTupleApproximator(board_size=4, patterns=patterns)
+td_mcts = TD_MCTS(env, approximator, iterations=50, exploration_constant=1.41, gamma=1)
+
 i = 0
 for fn, wt in weight_table.items():
     for f, w in wt.items():
@@ -363,22 +532,13 @@ for fn, wt in weight_table.items():
 
 
 def get_action(state, score):
-    env = Game2048Env()
-    env.board = state.copy()
-    env.score = score
+    root = TD_MCTS_Node(state)
 
-    legal_moves = [a for a in range(4) if env.is_move_legal(a)]
-    legal_moves = reorder_action(legal_moves)
+    # Run multiple simulations to build the MCTS tree
+    for _ in range(td_mcts.iterations):
+        td_mcts.run_simulation(root)
 
-    # TODO: Use your N-Tuple approximator to play 2048
-    best_action = legal_moves[0]
-    best_value = 0
-    for a in legal_moves:
-        env_copy = copy.deepcopy(env)
-        next_state, next_score, _, after_state = env_copy.step(a)
-        value = approximator.value(after_state) + next_score
-        if value > best_value:
-            best_action = a
-            best_value = value
+    # Select the best action (based on highest visit count)
+    best_act, _ = td_mcts.best_action_distribution(root)
 
-    return best_action
+    return best_act
