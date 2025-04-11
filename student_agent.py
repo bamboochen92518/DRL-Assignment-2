@@ -520,6 +520,8 @@ file_path = "approximator-23100000.json"
 with open(file_path, "r") as file:
     weight_table = json.load(file)
 approximator = NTupleApproximator(board_size=4, patterns=patterns)
+
+env = Game2048Env()
 td_mcts = TD_MCTS(env, approximator, iterations=50, exploration_constant=1.41, gamma=1)
 
 i = 0
