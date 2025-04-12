@@ -516,13 +516,13 @@ patterns = [
         ((0, 1), (0, 2), (0, 3), (1, 1), (2, 1)),          # L
     ]
 
-file_path = "approximator-23100000.json"
+file_path = "approximator-61300000.json"
 with open(file_path, "r") as file:
     weight_table = json.load(file)
 approximator = NTupleApproximator(board_size=4, patterns=patterns)
 
 env = Game2048Env()
-td_mcts = TD_MCTS(env, approximator, iterations=100, exploration_constant=1.41, gamma=1, V_norm=400000)
+td_mcts = TD_MCTS(env, approximator, iterations=50, exploration_constant=1.41, gamma=1, V_norm=4000)
 
 i = 0
 for fn, wt in weight_table.items():
