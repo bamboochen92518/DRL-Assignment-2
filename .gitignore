@@ -7,4 +7,4 @@ __pycache__/
 
 # ignore eval.py
 eval.py
-approximator-23100000.json
+approximator*

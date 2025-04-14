@@ -1,6 +1,132 @@
 import sys
 import numpy as np
 import random
+import copy
+import math
+from loguru import logger
+
+
+logger.add(sys.stderr, format="{time} {level} {message}", level="INFO")
+
+
+class Node:
+    def __init__(self, game, move, parent=None):
+        self.game = game  # Game state
+        self.move = move  # Move that led to this state (r, c, color)
+        self.parent = parent  # Parent node
+        self.children = {}  # List of child nodes
+        self.visits = 0  # Number of visits to this node
+        self.total_rewards = 0
+        self.untried_moves = self.get_legal_moves()  # Possible moves to try
+
+    def get_legal_moves(self):
+        """Returns all legal moves for the current game state."""
+        empty_positions = [(r, c) for r in range(self.game.size) for c in range(self.game.size) if self.game.board[r, c] == 0]
+        # random.shuffle(empty_positions)
+        return empty_positions
+
+    def fully_expanded(self):
+        # A node is fully expanded if no legal actions remain untried.
+        return len(self.untried_moves) == 0
+
+
+# TD-MCTS class utilizing a trained approximator for leaf evaluation
+class TD_MCTS:
+    def __init__(self, game, iterations=50, exploration_constant=1.41, rollout_depth=0, gamma=1):
+        self.game = game
+        self.iterations = iterations
+        self.c = exploration_constant
+        self.rollout_depth = rollout_depth
+        self.gamma = gamma
+
+    def create_game_from_board(self, board):
+        # Create a deep copy of the environment with the given state and score.
+        new_game = copy.deepcopy(self.game)
+        new_game.board = board.copy()
+        return new_game
+
+    def select_child(self, node):
+        # TODO: Use the UCT formula: Q + c * sqrt(log(parent.visits)/child.visits) to select the best child.
+        best_value = float('-inf')
+        best_child = None
+        for child in node.children.values():
+            uct_value = (child.total_rewards / (child.visits + 1e-6)) + self.c * math.sqrt(math.log(node.visits + 1) / (child.visits + 1e-6))
+            if uct_value > best_value:
+                best_value = uct_value
+                best_child = child
+        return best_child
+
+    def rollout(self, sim_game, depth, node):
+        # TODO: Perform a random rollout until reaching the maximum depth or a terminal state.
+        for _ in range(depth):
+            color = sim_game.whose_turn()
+            empty_positions = [(r, c) for r in range(self.game.size) for c in range(self.game.size) if sim_game.board[r, c] == 0]
+            if not empty_positions:
+                break
+            r, c = random.choice(empty_positions)
+            sim_game.board[r, c] = color
+            """
+            if sim_game.check_win():
+                score = {1: 0, 2: 0}
+                score[sim_game.check_win()] = 15000
+                return score
+            """
+        r, c, color = node.move
+        op_color = 3 - color
+        constant = 0.5 if sim_game.evaluate_board()[op_color] < 1000 else 10
+        a = sim_game.evaluate_position(r, c, color)
+        b = sim_game.evaluate_position(r, c, op_color)
+        logger.debug(f'm = {a}, o = {b}, r, c = {r}, {c}, color = {color}')
+        sim_game.board[r][c] = color
+        return a + b
+
+    def backpropagate(self, node, reward):
+        # TODO: Propagate the obtained reward back up the tree.
+        while node is not None:
+            node.visits += 1
+            node.total_rewards += reward
+            reward *= self.gamma  # Apply discount factor
+            node = node.parent
+
+    def run_simulation(self, root, my_color):
+        node = root
+        sim_game = self.create_game_from_board(node.game.board)
+        my_color = 1 if my_color == 'B' else 2
+
+        # TODO: Selection: Traverse the tree until reaching an unexpanded node.
+        while node.fully_expanded() and node.children:
+            node = self.select_child(node)
+            r, c, my_color = node.move
+            sim_game.board[r][c] = my_color
+
+        # TODO: Expansion: If the node is not terminal, expand an untried action.
+        if node.untried_moves:
+            action = node.untried_moves.pop()
+            r, c = action
+            turn = sim_game.whose_turn()
+            sim_game.board[r][c] = turn
+            new_node = Node(copy.deepcopy(sim_game), (r, c, turn), parent=node)
+            node.children[(r, c, turn)] = new_node
+            node = new_node
+
+        # Rollout: Simulate a random game from the expanded node.
+        rollout_reward = self.rollout(sim_game, self.rollout_depth, node)
+        # Backpropagate the obtained reward.
+        self.backpropagate(node, rollout_reward)
+
+    def best_action_distribution(self, root):
+        # Compute the normalized visit count distribution for each child of the root.
+        total_visits = sum(child.visits for child in root.children.values())
+        distribution = {}
+        best_visits = -1
+        best_action = None
+        for action, child in root.children.items():
+            distribution[action] = child.visits / total_visits if total_visits > 0 else 0
+            if child.total_rewards > best_visits:
+                best_visits = child.total_rewards
+                best_action = action
+        return best_action, distribution
+
 
 class Connect6Game:
     def __init__(self, size=19):
@@ -9,6 +135,7 @@ class Connect6Game:
         self.turn = 1  # 1: Black, 2: White
         self.game_over = False
         self.last_opponent_move = None
+        self.MCT = TD_MCTS(self)
 
     def reset_board(self):
         """Resets the board and game state."""
@@ -107,164 +234,59 @@ class Connect6Game:
 
         return ret
 
+    @logger.catch
     def generate_move(self, color):
         """Generates the best move based on predefined rules and ensures output."""
+
         if self.game_over:
             print("? Game over", flush=True)
             return
 
-        my_color = 1 if color.upper() == 'B' else 2
-        opponent_color = 3 - my_color
-        points = [(r, c) for r in range(self.size) for c in range(self.size) if self.board[r, c] != 0]
-        empty_positions = [(r, c) for r in range(self.size) for c in range(self.size) if self.board[r, c] == 0]
-        empty_positions = self.mask(empty_positions)
-        random.shuffle(empty_positions)
-        if len(points) != 0:
-            # 1. Winning move
-            ep_num = len(empty_positions)
-            for i in range(ep_num):
-                self.board[empty_positions[i][0], empty_positions[i][1]] = my_color
-                for j in range(i + 1, ep_num):
-                    self.board[empty_positions[j][0], empty_positions[j][1]] = my_color
-                    if self.check_win() == my_color:
-                        self.board[empty_positions[i][0], empty_positions[i][1]] = 0
-                        self.board[empty_positions[j][0], empty_positions[j][1]] = 0
-                        move_str = f"{self.index_to_label(empty_positions[j][1])}{empty_positions[j][0] + 1}"
-                        self.play_move(color, move_str)
-                        print(move_str, flush=True)
-                        return
-                    self.board[empty_positions[j][0], empty_positions[j][1]] = 0
-                self.board[empty_positions[i][0], empty_positions[i][1]] = 0
+        root = Node(game=copy.deepcopy(game), move=None)
 
-            # 2. Block opponent's winning move
-            for i in range(ep_num):
-                self.board[empty_positions[i][0], empty_positions[i][1]] = opponent_color
-                for j in range(i + 1, ep_num):
-                    self.board[empty_positions[j][0], empty_positions[j][1]] = opponent_color
-                    if self.check_win() == opponent_color:
-                        self.board[empty_positions[i][0], empty_positions[i][1]] = 0
-                        self.board[empty_positions[j][0], empty_positions[j][1]] = 0
-                        move_str = f"{self.index_to_label(empty_positions[j][1])}{empty_positions[j][0] + 1}"
-                        self.play_move(color, move_str)
-                        print(move_str, flush=True)
-                        return
-                    self.board[empty_positions[j][0], empty_positions[j][1]] = 0
-                self.board[empty_positions[i][0], empty_positions[i][1]] = 0
+        logger.debug('START SIMULATE')
+        for _ in range(len(root.untried_moves)):
+            self.MCT.run_simulation(root, my_color=color)
 
-        # 3. Attack: prioritize strong formations
-        best_move = None
-        best_score = -1
-        for r, c in empty_positions:
-            score = self.evaluate_position(r, c, my_color)
-            if score > best_score:
-                best_score = score
-                best_move = (r, c)
+        best_action, _ = self.MCT.best_action_distribution(root)
 
-        # 4. Defense: prevent opponent from forming strong positions
-        for r, c in empty_positions:
-            opponent_score = self.evaluate_position(r, c, opponent_color)
-            if opponent_score >= best_score:
-                best_score = opponent_score
-                best_move = (r, c)
-
-        # 5. Execute best move
-        if best_move:
-            r, c = best_move
-            move_str = f"{self.index_to_label(c)}{r + 1}"
-            self.play_move(color, move_str)
-            print(move_str, flush=True)
-            return
-
-        # 6. Default move: play near last opponent move
-        if self.last_opponent_move:
-            last_r, last_c = self.last_opponent_move
-            potential_moves = [(r, c) for r in range(max(0, last_r - 2), min(self.size, last_r + 3))
-                                           for c in range(max(0, last_c - 2), min(self.size, last_c + 3))
-                                           if self.board[r, c] == 0]
-            if potential_moves:
-                selected = random.choice(potential_moves)
-                move_str = f"{self.index_to_label(selected[1])}{selected[0] + 1}"
-                self.play_move(color, move_str)
-                print(move_str, flush=True)
-                return
-
-        # 7. Random move as fallback
-        selected = random.choice(empty_positions)
-        move_str = f"{self.index_to_label(selected[1])}{selected[0] + 1}"
+        move_str = f"{self.index_to_label(best_action[1])}{best_action[0] + 1}"
         self.play_move(color, move_str)
         print(move_str, flush=True)
+        return
+
+    def evaluate_board(self):
+        """Checks if a player has won. Returns 1 (Black wins), 2 (White wins), or 0 (no winner)."""
+        # logger.debug(self.board)
+        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+        score = {1: 0, 2: 0}
+        cs = {0: 0, 1: 1, 2: 10, 3: 100, 4: 1000, 5: 10000, 6: 100000}
+        for r in range(self.size):
+            for c in range(self.size):
+                for dr, dc in directions:
+                    counter = [0, 0, 0]
+                    rr, cc = r, c
+                    for i in range(6):
+                        if 0 <= rr < self.size and 0 <= cc < self.size:
+                            counter[self.board[rr, cc]] += 1
+                            rr += dr
+                            cc += dc
+                        else:
+                            break
+                    if sum(counter) == 6:
+                        if counter[1] == 0:
+                            score[2] += cs[counter[2]]
+                        if counter[2] == 0:
+                            score[1] += cs[counter[1]]
+
+        return score
 
     def evaluate_position(self, r, c, color):
         """Evaluates the strength of a position based on alignment potential."""
-        directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
-        score = 0
-
-        for dr, dc in directions:
-            count = 1
-            rr, cc = r + dr, c + dc
-            while 0 <= rr < self.size and 0 <= cc < self.size and self.board[rr, cc] == color:
-                count += 1
-                rr += dr
-                cc += dc
-            rr, cc = r - dr, c - dc
-            while 0 <= rr < self.size and 0 <= cc < self.size and self.board[rr, cc] == color:
-                count += 1
-                rr -= dr
-                cc -= dc
-
-            if count >= 5:
-                score += 10000
-            elif count == 4:
-                score += 5000
-            elif count == 3:
-                score += 1000
-            elif count == 2:
-                score += 100
-        '''
-
-        for dr, dc in directions:
-            count = 1
-            rr, cc = r + dr, c + dc
-            dist = [1, 1]
-            while 0 <= rr < self.size and 0 <= cc < self.size:
-                if self.board[rr, cc] == color:
-                    count += 0.8 ** dist[0]
-                    dist[0] += 1
-                elif self.board[rr, cc] == 0:
-                    count += 0.4 ** dist[0]
-                    dist[0] += 1
-                else:
-                    break
-                rr += dr
-                cc += dc
-            rr, cc = r - dr, c - dc
-            while 0 <= rr < self.size and 0 <= cc < self.size:
-                if self.board[rr, cc] == color:
-                    count += 0.8 ** dist[1]
-                    dist[1] += 1
-                elif self.board[rr, cc] == 0:
-                    count += 0.4 ** dist[1]
-                    dist[1] += 1
-                else:
-                    break
-                rr -= dr
-                cc -= dc
-
-            if sum(dist) < 5:
-                score += 0
-                continue
-
-            score += 5 ** count
-            if count >= 5:
-                score += 10000
-            elif count == 4:
-                score += 5000
-            elif count == 3:
-                score += 1000
-            elif count == 2:
-                score += 100
-        '''
-        return score
+        self.board[r, c] = color
+        score = self.evaluate_board()
+        self.board[r, c] = 0
+        return score[color]
 
     def show_board(self):
         """Displays the board in text format."""
@@ -333,6 +355,16 @@ class Connect6Game:
                 break
             except Exception as e:
                 print(f"? Error: {str(e)}")
+
+    def whose_turn(self):
+        black_num = np.count_nonzero(self.board == 1)
+        white_num = np.count_nonzero(self.board == 2)
+
+        if black_num % 2 == 1 and black_num >= white_num:
+            return 2
+        if white_num % 2 == 0 and white_num >= black_num:
+            return 1
+        print('whose_turn is wrong')
 
 
 if __name__ == "__main__":
